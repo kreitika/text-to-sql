@@ -341,3 +341,89 @@ Failure modes to watch for:
 - **NULL mishandling** — using `!=` where `IS NOT NULL` is needed
 
 Knowing the true answer is what makes catching these possible.
+
+
+
+---
+
+## Milestone 2 — Schema Extraction
+
+**The problem:** the LLM knows SQL in general but has never seen *this* database. With no
+context it invents table and column names — a `users` table, a `created_at` column. Not
+stupidity; just uninformed. So the schema description is the single most important input to
+the whole system. Good schema text = accurate SQL.
+
+**The technique — introspection:** asking the database to describe itself. Postgres stores
+its own structure in the `information_schema` views, which are queried like normal tables.
+
+```bash
+python schema_extractor.py
+```
+
+### Why extract automatically instead of hardcoding the schema
+
+1. Schemas change — hardcoded text goes stale and silently wrong.
+2. **It makes the system schema-agnostic.** Point it at a hospital database and it works.
+   This is the concrete answer to the overfitting question: the pipeline isn't specialized
+   to e-commerce at all.
+
+### The three system views used
+
+| View | Gives |
+|---|---|
+| `information_schema.tables` | every table name |
+| `information_schema.columns` | column names, data types, nullability |
+| `information_schema.table_constraints` + `key_column_usage` + `constraint_column_usage` | foreign keys |
+
+**Critical filter:** `WHERE table_schema = 'public'` restricts results to *our* tables.
+Without it, hundreds of Postgres internal tables come back and bloat the prompt.
+
+`ORDER BY ordinal_position` returns columns in declared order rather than alphabetical —
+reads far more naturally to a model.
+
+**Foreign keys need a 3-way JOIN** because Postgres splits FK metadata across three views
+(the constraint, the local column, the referenced column), stitched back together on
+`constraint_name`. Same JOIN pattern as the practice queries, applied to system tables.
+
+**Why FKs matter most:** column lists alone don't tell the model that
+`orders.customer_id` points at `customers.id`. Without that, it invents joins —
+a **join hallucination**.
+
+### Extracted output (current state)
+
+```
+5 tables, 4 relationships:
+  products.category_id  -> categories.id
+  orders.customer_id    -> customers.id
+  order_items.order_id  -> orders.id
+  order_items.product_id -> products.id
+```
+
+### Gaps in this output — each one is a future hallucination
+
+- **`status` values are invisible.** The model sees `status: character varying` but not that
+  the real values are `pending / shipped / delivered / cancelled`. Ask "how many orders were
+  completed?" and it writes `WHERE status = 'completed'` → matches zero rows → returns **0**
+  with no error. *The most dangerous failure mode in the project: wrong answers that look
+  right.* Fix: query `SELECT DISTINCT` on low-cardinality columns and inject the real values.
+- **Primary keys aren't marked** — the model infers `id` is the key from its name. Usually
+  fine, occasionally not.
+- **No semantics, only structure** — nothing states that revenue = `price × quantity`, or
+  that `order_items` is a junction table. The model must guess intent from names.
+
+Structurally complete, semantically thin. Enriching this is Milestone 3's job — and a large
+share of real Text-to-SQL accuracy comes from exactly that enrichment.
+
+**Cosmetic note:** `character varying` is Postgres's formal name for `VARCHAR`. Worth mapping
+to the short form, since that's what appears most in the model's training data.
+
+### Python note
+
+```python
+if __name__ == "__main__":
+```
+Runs only when the file is executed directly, not when imported by another file. Prevents
+stray prints once `build_schema_text()` gets imported into the prompt constructor.
+
+
+
