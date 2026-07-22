@@ -232,3 +232,112 @@ Questions worth revisiting as the project develops:
   evaluate anything. The real risk is **us** overfitting development to one small dataset.
   Mitigations: read the schema at runtime (schema-agnostic), hold back untuned test
   questions, and keep the seed data deliberately messy.
+
+
+  ---
+
+## SQL Fundamentals (practice — not a milestone)
+
+Getting fluent in the language the LLM will generate, so its output can be judged.
+
+### Basic SELECT
+
+```sql
+SELECT name, price FROM products LIMIT 5;
+```
+`SELECT` picks columns, `FROM` picks the table, `LIMIT` caps output. Always use `LIMIT` when
+exploring. Returns rows one-for-one (unlike `COUNT(*)`, which collapses them).
+
+### Filtering and sorting
+
+```sql
+SELECT name, price FROM products WHERE price > 1000 ORDER BY price DESC LIMIT 5;
+```
+`WHERE` filters rows before they return. `ORDER BY ... DESC` sorts high→low (`ASC` is the
+default).
+
+### NULL — the silent trap
+
+```sql
+SELECT COUNT(*) FROM customers WHERE country != 'India';
+SELECT COUNT(*) FROM customers WHERE country IS NULL;
+```
+These two don't add up to 200. **NULL means "unknown," and comparing anything to unknown
+yields unknown — not true.** So `country != 'India'` silently DROPS the NULL rows.
+
+Must write `IS NULL` / `IS NOT NULL` — never `= NULL`. This is the most common source of
+quietly-wrong SQL, and a prime LLM failure mode.
+
+### JOIN — following a foreign key
+
+Problem: `products.category_id` is just a number. The human-readable name lives in another
+table.
+
+```sql
+SELECT p.name, p.price, c.name AS category
+FROM products p
+JOIN categories c ON p.category_id = c.id
+LIMIT 5;
+```
+
+Read as: take `products` (aliased `p`), and for each row find the `categories` row (aliased
+`c`) where `p.category_id = c.id`.
+
+| Piece | Meaning |
+|---|---|
+| `p`, `c` | **aliases** — shorthand so `p.name` replaces `products.name` |
+| `ON` | the **join condition** — the matching rule |
+| `AS category` | renames a column in the output (needed here: both tables have `name`) |
+
+The `ON` clause is almost always `foreign_key = primary_key` — literally the arrows in the
+schema diagram.
+
+### GROUP BY — aggregate per bucket
+
+```sql
+SELECT c.name AS category, COUNT(*) AS product_count
+FROM products p
+JOIN categories c ON p.category_id = c.id
+GROUP BY c.name
+ORDER BY product_count DESC;
+```
+`GROUP BY` buckets rows; the aggregate then runs *within each bucket*. 5 categories in →
+5 rows out.
+
+**The rule that trips everyone up:** every column in `SELECT` must either appear in
+`GROUP BY` or be wrapped in an aggregate. A bare `p.name` here is rejected — there are many
+product names per bucket and Postgres can't guess which one was meant.
+
+### Multi-table query — revenue by category
+
+Revenue = price × quantity, and those live in different tables, so the full chain is needed:
+`categories → products → order_items`.
+
+```sql
+SELECT c.name AS category,
+       ROUND(SUM(p.price * oi.quantity), 2) AS revenue
+FROM order_items oi
+JOIN products p   ON oi.product_id = p.id
+JOIN categories c ON p.category_id = c.id
+GROUP BY c.name
+ORDER BY revenue DESC;
+```
+
+Each JOIN follows one arrow in the schema diagram.
+
+**Pattern to internalize:** start from the most granular table (here `order_items`, the
+junction table) and join outward. The finest-grained table is usually the anchor.
+
+### Why this matters for the project
+
+The output of that revenue query is **ground truth**. Later, the same question gets asked in
+English, the LLM generates SQL, and the results get compared.
+
+Failure modes to watch for:
+- **Column hallucination** — inventing `products.category` (doesn't exist; it's
+  `category_id` → `categories.name`)
+- **Join hallucination** — joining `order_items` straight to `categories`, skipping
+  `products` entirely
+- **NULL mishandling** — using `!=` where `IS NOT NULL` is needed
+
+Knowing the true answer is what makes catching these possible.
