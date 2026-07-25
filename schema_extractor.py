@@ -63,6 +63,14 @@ def get_foreign_keys():
     return cur.fetchall()
 
 
+def get_distinct_values(table, column, max_values=15):
+    """For low-cardinality text columns, fetch the actual values.
+    The model can't guess that status = 'delivered' and not 'completed'."""
+    cur.execute(f'SELECT DISTINCT "{column}" FROM "{table}" LIMIT {max_values + 1};')
+    values = [r[0] for r in cur.fetchall() if r[0] is not None]
+    return values if len(values) <= max_values else None
+
+
 # ------------------------------------------------------------
 # 4. Format everything into LLM-readable text
 # ------------------------------------------------------------
@@ -74,10 +82,14 @@ def build_schema_text():
     for t in tables:
         lines.append(f"Table: {t}")
         for col, dtype, nullable in get_columns(t):
-            # Flag nullable columns so the model knows to handle NULLs (IS NULL, not !=)
             null_note = "" if nullable == "NO" else " (nullable)"
-            lines.append(f"  - {col}: {dtype}{null_note}")
-        lines.append("")                      # blank line between tables
+            dtype = "varchar" if dtype == "character varying" else dtype
+            hint = ""
+            if dtype == "varchar":
+                vals = get_distinct_values(t, col)
+                if vals and len(vals) <= 10:
+                    hint = f"  [values: {', '.join(map(str, vals))}]"
+            lines.append(f"  - {col}: {dtype}{null_note}{hint}")
 
     lines.append("Relationships:")
     for table, col, ftable, fcol in fks:
