@@ -530,3 +530,85 @@ user that *physically cannot* write.
 
 
 
+---
+
+## Milestone 5 — The Safety Layer
+
+The milestone that makes the project deployable. Everything before assumed the model behaves;
+this assumes it doesn't. Core principle: **defense in depth** — multiple independent layers,
+so no single failure is catastrophic.
+
+### The three layers (weakest → strongest)
+
+| Layer | What | Enforced by | Defeats |
+|---|---|---|---|
+| 1. Clean | strip markdown fences / whitespace | our code (`clean_sql`) | model formatting sloppiness |
+| 2. Validate | confirm single read-only SELECT | our code (`validate_sql`) | wrong statement types, injection |
+| 3. Read-only user | DB account with SELECT only | **PostgreSQL permissions** | everything — the real wall |
+
+Why all three: layer 2 lives in our code, and code has bugs — a query might slip past the
+parser. Layer 3 doesn't trust our code at all; it's enforced *below* the application by the
+database itself. Layer 2 catches most bad queries early with a clear message; layer 3 catches
+whatever layer 2 misses.
+
+### Layer 3 — read-only database user (the most important decision)
+
+```sql
+CREATE USER sql_readonly WITH PASSWORD '...';
+GRANT CONNECT ON DATABASE ecommerce TO sql_readonly;
+GRANT USAGE ON SCHEMA public TO sql_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO sql_readonly;
+-- deliberately NO insert/update/delete/drop
+```
+
+Tested it: connected as `sql_readonly`, ran `DELETE FROM customers;` →
+`ERROR: permission denied for table customers`. **This is the wall.** No LLM output — even a
+valid `DROP` — can execute, because the user lacks the power. Enforced beneath the app,
+beyond any prompt injection.
+
+**Principle of least privilege:** give every component exactly the permissions it needs and
+no more. The query-runner needs to read → it gets read and nothing else.
+
+**psql prompt tell:** `=#` = superuser/owner (full power); `=>` = restricted user. The prompt
+symbol itself signals privilege level. (Also: `->` = psql waiting for a statement to finish —
+usually means a git/shell command was typed inside psql by mistake.)
+
+### Layer 2 — SQL validation (`safety.py`)
+
+`sqlparse` parses SQL into structure instead of eyeballing strings. Three checks:
+1. **Exactly one statement** — blocks injection like `SELECT 1; DELETE FROM orders;`
+   (checking statement *count*, not just the first keyword, is what defeats this).
+2. **First keyword is SELECT** — reject anything else outright.
+3. **Keyword blocklist** — belt-and-suspenders backstop.
+
+**Honest limitation (interview gold):** a keyword blocklist is heuristic — false positives
+(a column named "update") and false negatives (obfuscation). That's *why* it's not relied on
+alone; it sits on top of the read-only user, which enforces via permissions, not
+string-matching. "My parser is heuristic, so I back it with database-level permissions."
+
+### Layer 1 — output cleaning (`safety.py`)
+
+`re` (regex) strips ```` ```sql ```` fences the model sometimes adds. Cheap, always-on,
+defensive — robust systems don't assume clean output even when it looked clean once.
+
+### Assembling the pipeline (`run_query.py`)
+
+Order encodes the philosophy: **generate → clean → check refusal → validate → execute as
+read-only user.** Every gate must pass before touching data, and even execution runs behind
+the permission wall.
+
+Returns a structured dict with a `stage` field (`generation` / `validation` / `execution`)
+instead of crashing — so we know *which layer* caught a failure. Observability matters later.
+
+### End-to-end results
+
+- "How many customers?" → `[(200,)]` ✅
+- "Which category earned most revenue?" → `('Sports', Decimal('602026.89'))` ✅ matches
+  hand-written ground truth → **real evaluation done**.
+  - Note: `Decimal`, not float — the `NUMERIC` schema choice paying off. Exact to the cent.
+- "Delete all customers" → blocked at **generation** (model returned CANNOT_ANSWER).
+  Had it slipped through: validator blocks it; had that failed: read-only user blocks it.
+  Three nets, threat beat none. Defense in depth in practice.
+
+
+
