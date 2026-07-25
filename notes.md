@@ -426,4 +426,107 @@ Runs only when the file is executed directly, not when imported by another file.
 stray prints once `build_schema_text()` gets imported into the prompt constructor.
 
 
+---
+
+## Milestone 3 — Prompt Generation
+
+### Storing the API key safely (`.env`)
+
+```
+OPENAI_API_KEY=sk-...
+```
+Secrets NEVER go in code — code gets committed, shared, screenshotted. A key on a public
+repo is scraped by bots within minutes and billed to the account. The `.gitignore` line for
+`.env` is what protects it. **Always `git status` before committing to confirm `.env` is
+invisible.**
+
+Separating config from source is the "twelve-factor app" principle — worth naming in an
+interview. Code reads the key from the environment; the value lives in a file that never
+leaves the laptop.
+
+```bash
+pip install python-dotenv openai
+```
+- `python-dotenv` — loads `.env` into environment variables.
+- `openai` — official API client.
+
+### Schema enrichment (the key idea)
+
+**Structure vs. contents:** `information_schema` gives table/column structure for free
+(the DB maintains it as metadata). But the *values inside* a column are not metadata —
+the only way to know them is to read the rows with `SELECT DISTINCT`.
+
+`get_distinct_values()` runs on EVERY text column, but only **categorical** (low-cardinality)
+columns keep their result. The `≤ 10` rule is a proxy for "is this categorical?":
+
+| Column | Distinct values | Listed? |
+|---|---|---|
+| `orders.status` | 4 | ✅ yes — categorical |
+| `categories.name` | 5 | ✅ yes — categorical |
+| `customers.email` | ~200 | ❌ no — free-form, would be noise |
+
+**Why it matters:** without the values, the model sees `status: varchar` and guesses
+`WHERE status = 'completed'` → 0 rows → silent wrong answer. With
+`status: varchar [values: shipped, cancelled, pending, delivered]` injected into the prompt,
+it maps "completed" → "delivered" or returns CANNOT_ANSWER.
+
+**Caveat — string interpolation here, not `%s`:** table/column *names* can't be
+parameterized (only values can). Mitigation: names come from `information_schema`, not user
+input, plus double-quoting. Also doesn't scale — `SELECT DISTINCT` on a 50M-row column is
+expensive; production would sample or cache.
+
+### The prompt (`prompt_builder.py`)
+
+System prompt rules and why each exists:
+
+| Rule | Purpose |
+|---|---|
+| "Output ONLY SQL, no markdown" | output is executed directly; prose breaks it |
+| "Use ONLY listed tables/columns" | reduces schema hallucination (not sufficient alone) |
+| "Never INSERT/UPDATE/DELETE/DROP" | **weakest** safety layer — a polite request, ignorable |
+| "Always LIMIT 100" | stops runaway result sets |
+| "Output CANNOT_ANSWER if impossible" | escape hatch — without one, the model invents tables |
+
+**Prompt-level safety is the weakest layer.** Real defense comes in M5: read-only DB user +
+SQL parsing. Principle: **defense in depth** — multiple independent layers, no single failure
+is fatal.
+
+---
+
+## Milestone 4 — SQL Generation via API
+
+```bash
+python generate_sql.py
+```
+
+### API concepts
+
+| Concept | Meaning |
+|---|---|
+| `messages` roles | `system` = standing orders (schema + rules), `user` = the question. Models weight system as higher authority — which is why safety rules go there, and also why prompt injection via the user message is a threat. |
+| `model="gpt-4o-mini"` | cheap/fast; develop here, only use full `gpt-4o` to test top quality |
+| `temperature=0` | deterministic output — same question → same SQL. Correct for structured output; opposite of creative writing. |
+| `response.choices[0].message.content` | API returns candidates; `[0]` = first, `.message.content` = the text |
+
+### Results — proof the pipeline works
+
+- Q "How many customers?" → `SELECT COUNT(*) FROM customers;` ✅
+- Q "Which category earned most revenue?" → correct 4-table join, arrived at same answer as
+  the hand-written query (started from a different table — both valid) ✅
+- Q "How many orders were **completed**?" → `WHERE status = 'delivered'` ✅
+  **This is the enrichment proving itself.** No "completed" value exists; the model mapped it
+  to the real value because the injected value list told it what exists. Without enrichment
+  this would have silently returned 0.
+
+### What's still fragile (→ motivates M5/M6)
+
+- Output was clean bare SQL **this time** — models don't always comply (markdown fences,
+  preambles). We feed this string straight to the DB, so any stray character breaks it.
+- **Nothing is checked before execution.** No validation that referenced columns exist, no
+  block on destructive statements, no read-only enforcement. We got lucky the output was safe.
+
+Next: M5 strips formatting, parses SQL to confirm read-only SELECT, and connects via a DB
+user that *physically cannot* write.
+
+
 
