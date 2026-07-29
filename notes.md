@@ -668,3 +668,61 @@ still rejects safely. M6's job is early, legible detection — not final safety.
 - `x.nonexistent_col` → 🚫 flagged
 - Valid columns passing matters as much as invalid ones flagged — a detector that cries wolf
   on real queries is useless.
+
+
+  ---
+
+## Milestone 7 — Confidence Scoring
+
+**The idea:** every layer emits a *signal* (refused? validated? hallucinated? executed? rows
+returned? how complex?). Confidence scoring gathers this scattered evidence into ONE number
+answering the user's real question: *how much should I trust this?*
+
+**Crucial framing (interview point):** this is a **heuristic, not a calibrated probability.**
+We combine sensible signals into a useful indicator — not a rigorous "73% chance correct."
+Knowing that difference matters.
+
+### Signals and weights (`confidence.py`)
+
+| Signal | Penalty | Why that weight |
+|---|---|---|
+| Hallucination detected | −50 | strongest — query is fundamentally broken |
+| Failed to execute | −40 | nearly as bad; *why* it failed varies slightly |
+| Zero rows returned | −20 | ambiguous — could be empty-but-correct |
+| ≥3 joins | −15 | more joins = more room for a subtle error |
+| 1–2 joins | −5 | mild; complex queries are often fine |
+
+Labels: ≥80 HIGH, ≥50 MEDIUM, else LOW.
+
+**Every weight is arguable — that's the honest nature of a heuristic.** Philosophy: penalize
+signals of unreliability proportionally to how strongly they indicate a problem. Production
+would *tune these against a labeled test set* (the held-out-questions idea). "Hand-tuned
+heuristics; I'd calibrate against ground truth in production" = senior answer.
+
+### Pipeline shift
+
+Hallucination check no longer *blocks* — it *informs the score*. Moved from a hard gate to a
+graded trust signal. (The read-only user is still the hard safety wall underneath; only the
+*hallucination* layer became advisory, not the *safety* layer.)
+
+### Results
+
+- simple count → HIGH 100
+- 2-join revenue → HIGH 95 (penalty visible)
+- completed→delivered → HIGH 100, 131 rows
+- "Atlantis" → LOW 0 (model refused, CANNOT_ANSWER)
+
+Score moves with complexity, collapses on refusal → the system **knows what it doesn't know.**
+
+### Debugging arc — the most valuable lesson here
+
+Three bugs in a row, all the same species: **wrong assumptions about the shape of text.**
+1. `" JOIN "` (spaces) missed joins that had newlines around them → count was 0.
+2. Replaced the counter but dropped the penalty lines → dead code (counted, never used).
+3. I *theorized* a tokenization bug ("INNER JOIN tokenizes differently") and nearly patched
+   working code — **a probe (`flatten()` + print keywords) proved the count was already
+   correct.** N tables = N−1 joins; "2 joins" for 3 tables was right.
+
+**Rule that caught all three: verify the assumption with a tiny test before patching. Trust
+the probe over the theory; trust the output over the story about the output.** This is not a
+beginner skill to outgrow — it's most of real debugging.
