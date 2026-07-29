@@ -97,6 +97,14 @@ def build_schema_text():
 
     return "\n".join(lines)
 
+def get_schema_map():
+    """Return {table_name: set_of_column_names} for validation lookups."""
+    schema = {}
+    for t in tables:
+        cols = {col for col, _, _ in get_columns(t)}
+        schema[t] = cols
+    return schema
+
 
 # Only runs when this file is executed directly — not when imported elsewhere.
 if __name__ == "__main__":
