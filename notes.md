@@ -612,3 +612,59 @@ instead of crashing — so we know *which layer* caught a failure. Observability
 
 
 
+---
+
+## Milestone 6 — Hallucination Detection
+
+**SQL hallucination ≠ chatbot hallucination.** The model isn't making up facts — it's
+referencing database objects that don't exist. Four types:
+
+| Type | Example | Caught by |
+|---|---|---|
+| **Table** | `FROM users` when it's `customers` | M6 (extendable) |
+| **Column** | `products.category` when it's `category_id` | **M6 (this milestone)** |
+| **Join** | joining on a relationship that isn't real | future hardening |
+| **Value** | `status = 'completed'` (no such value) | M3 enrichment |
+
+M6 tackles table + column hallucination — most common, most catchable, because we already
+extracted the real schema and can check references against it.
+
+### Why catch early, when the DB would reject it anyway?
+
+Without M6: invented column reaches Postgres → cryptic `ERROR: column "category" does not
+exist`, only *after* a round-trip. With M6: caught *before* execution → clear structured
+signal ("model hallucinated column X") that we can log, message, and **feed into confidence
+scoring (M7).** Raw DB error vs. intelligible diagnosis — that's the point.
+
+### How it works (`hallucination.py`)
+
+- `get_schema_map()` → `{table: {columns}}` — a fast LOOKUP structure (vs. `build_schema_text`
+  which is prose for the LLM). `|=` set-union merges all columns into one "real columns" set.
+- Flatten the SQL into tokens; **the `.` is the anchor** — a qualified reference is always
+  `table.column` or `alias.column`, so every dot marks a spot to check.
+- Take the word after each dot; if it exists in NO real table → flag it.
+
+### The deliberate limitation (interview gold)
+
+Checks "does this column exist **somewhere**?" — NOT "does it exist in **this specific**
+table?" Because the left side is often an alias (`p` = products), and resolving aliases back
+to real tables is the hard part, deferred.
+
+- Catches: columns that exist nowhere (clearest hallucinations). ✅
+- Misses: `SELECT c.name FROM products c;` — `name` exists (wrong table), so it passes. ❌
+  (accepted false-negative)
+
+Framing: *"My detector catches columns that exist nowhere; resolving aliases to catch
+wrong-table references is the next hardening step."*
+
+**Belt-and-suspenders, not last line of defense.** Anything M6 misses, the read-only DB user
+still rejects safely. M6's job is early, legible detection — not final safety.
+
+### Results
+
+- `c.name` (categories) → ✅ passes
+- `p.category` (products) → 🚫 flagged — **the exact hallucination predicted in M2**
+- `o.customer_id` (orders) → ✅ passes
+- `x.nonexistent_col` → 🚫 flagged
+- Valid columns passing matters as much as invalid ones flagged — a detector that cries wolf
+  on real queries is useless.
