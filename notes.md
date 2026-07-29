@@ -726,3 +726,61 @@ Three bugs in a row, all the same species: **wrong assumptions about the shape o
 **Rule that caught all three: verify the assumption with a tiny test before patching. Trust
 the probe over the theory; trust the output over the story about the output.** This is not a
 beginner skill to outgrow — it's most of real debugging.
+
+
+
+---
+
+## Milestone 8 — Frontend (Streamlit)
+
+**Streamlit** turns a plain Python script into a web app — no HTML/CSS/JS. Re-runs the whole
+script top-to-bottom on every interaction. Built for data/ML demos.
+
+```bash
+streamlit run app.py     # NOT python app.py — launches server at localhost:8501
+```
+
+### Design decisions (`app.py`)
+
+- **Confidence badge = signature element.** Green/amber/red pill at the *top* of every answer,
+  before the data. The eye lands on trust first — "safety over accuracy" embodied in layout.
+- **`st.expander("Why this confidence level?")`** — exposes the reasons list on demand. This is
+  the "explain how the answer was generated" requirement, delivered as transparency-on-demand.
+- **`st.spinner`** copy names what's happening ("checking safety, running query") — tells the
+  user the answer is being *vetted*, not just fetched.
+- **Error copy** — plain direction, no apology ("Couldn't answer this one"). Failure as info.
+
+Streamlit limits deep restyling (it generates its own HTML), so boldness went into layout +
+the badge, not custom typography.
+
+### Temporal grounding fix (found by using the app)
+
+Bug: asked "how many customers this year" → model generated `signup_date >= '2023-01-01'`.
+**The model has no clock** — it guessed the year, and guessed a stale one. Returned a
+confident, wrong 200 (all customers) with no error — silent failure again.
+
+Fix: inject today's date into the prompt.
+```python
+today = date.today().isoformat()   # "2026-07-29", computed fresh each run
+# added to system prompt: "Today's date is {today}. Use for 'this year', 'last month', etc."
+```
+Now "this year" → 2026 → correct (smaller) count.
+
+**The recurring lesson, 4th time:** every hallucination traced back to *missing context in the
+prompt* — invented status values (fixed by injecting real values), wrong year (fixed by
+injecting the date). The fix is almost always "tell it the thing it couldn't know," not "hope
+the model is smarter." **That realization is prompt engineering.**
+
+### Schema-agnostic (answer to "does it only work on our DB?")
+
+The **code** is not hardwired to e-commerce — `schema_extractor.py` never says "customers," it
+*asks the DB* via introspection. Point it at any PostgreSQL database (change `DB_NAME`, grant
+the read-only user access) and it works, no code changes. A running *instance* targets one DB
+by configuration — which is correct and a security feature, not a limitation.
+
+Caveats: PostgreSQL-specific (introspection queries are Postgres-flavored); accuracy depends
+on how self-descriptive the schema is (cryptic table names → worse results).
+
+Possible future proof: build a second `library` database, point the same code at it, ask
+"which author wrote the most books?" — proves schema-agnosticism, defeats the overfitting
+worry with evidence.

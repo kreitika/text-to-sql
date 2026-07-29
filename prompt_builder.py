@@ -11,9 +11,17 @@ Rules:
 - If the question cannot be answered from this schema, output exactly: CANNOT_ANSWER
 """
 
+from datetime import date
+
 def build_prompt(question):
     schema = build_schema_text()
-    system = f"{SYSTEM_PROMPT}\n\nDATABASE SCHEMA:\n{schema}"
+    today = date.today().isoformat()
+    system = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"Today's date is {today}. Use this for any relative time references "
+        f"like 'this year', 'last month', 'recent'.\n\n"
+        f"DATABASE SCHEMA:\n{schema}"
+    )
     return system, question
 
 if __name__ == "__main__":
